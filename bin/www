@@ -1,0 +1,370 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+var app = require('../app');
+var debug = require('debug')('express-l17:server');
+var http = require('http');
+var https = require('https');
+var path = require('path');
+var fs = require('fs');
+var socketIO = require('socket.io');
+const nodes_model = require('../src/models/node/node')
+const call_set_model = require('../src/models/call_set/call_set')
+var pairGenerator = require('../src/middleware/pair-generator')
+var ip = require("ip");
+var cron = require('node-cron');
+// console.log("Ip address is : ", ip.address())
+global.duration = 10;
+function AddMinutesToDate(date, minutes) {
+  return new Date(date.getTime() + minutes*60000);
+}
+
+function prGnrt(pair, result){
+	let pairArr = []
+	for(let rs of result){
+		if(pair.includes(rs.nodeDesc)){
+			if(pair[0] == rs.nodeDesc){
+				let obj = {
+					nodeName : rs.nodeName,
+					nodeDesc : rs.nodeDesc
+				}
+				pairArr.push(obj)
+			} else if(pair[1] == rs.nodeDesc){
+        let obj = {
+					nodeName : rs.nodeName,
+					nodeDesc : rs.nodeDesc
+				}
+				pairArr.push(obj)
+      }
+		}
+	}
+	return pairArr;
+}
+async function listen(port) {
+  let result = [];
+  let call_sets = [];
+  let nodePairs = [];
+  cron.schedule('5 9 * * SUN', async function() {
+    result = await nodes_model.Node.find({}, {nodeDesc : 1, _id: 0}).limit(2); // Fetch nodes for sunday, and skip last 2 nodes.
+  });
+  cron.schedule('0 9 * * Mon', async function() {
+    result = await nodes.Node.find({}, {nodeDesc : 1, _id: 0}); // Fetch all nodes on Monday Morning and use the same nodes till Saturday.
+  });
+
+  if(!result.length){ // If server starts and found that nodes array is empty.
+    if(new Date().getDay() == 0){
+      result = await nodes_model.Node.find({}, {nodeDesc : 1, _id: 0}).limit(2); // Fetch nodes for sunday, and skip last 2 nodes.
+    } else {
+      call_sets = await call_set_model.Call_Set.find({});
+      result = await nodes_model.Node.find({}); // Fetch all nodes on Monday Morning and use the same nodes till Saturday.
+    }
+  }
+  
+  for(let nd of result){
+    nodePairs.push(nd.nodeDesc);
+  }
+  let pairs = pairGenerator.pairGenerator(nodePairs);
+  if(!call_sets.length){
+    for(let pair of pairs){
+      if(pair){
+        let dbObj = { 
+          seq: pair.seq,
+          set_name: pair.set_name,
+          call_set: [ ]
+        }
+        for(let call_set of pair.call_set){
+          dbObj.call_set.push({ call_pair: prGnrt(call_set.call_pair, result), callTime: '' })
+        }
+        let call_st = new call_set_model.Call_Set(dbObj);
+        call_st.save().then(rs => {})
+      }
+    }
+  }
+  /**
+   * Get port from environment and store in Express.
+   */
+  var port = normalizePort(process.env.PORT || port || '3000');
+  app.set('port', port);
+
+  /**
+   * Create HTTP server.
+   */
+
+  // var options = {
+  //   key: fs.readFileSync(path.join(__dirname, '../../cert', 'server.key')),
+  //   cert: fs.readFileSync(path.join(__dirname, '../../cert', 'server.crt'))
+  // };
+  // var server = https.createServer(options, app);
+  var server = http.createServer(app);
+
+  /**
+   * Listen on provided port, on all network interfaces.
+   */
+  server.listen(port, function () {
+    console.log("Server listening on port:%s", port);
+  });
+
+  server.on('error', onError);
+  server.on('listening', onListening);
+  nodes = {};
+  var io = socketIO(server, { origins: '*:*'});
+
+  io.set('origins', '*:*');
+  io.origins('*:*');
+  const rooms = {};
+  var pair_iterator = 0;  
+  disconnectArr = [];
+  conditionalArr = [];
+  currentPair = pairs[pair_iterator]; 
+  // console.log("listen -> currentPair", currentPair)
+  io.on('connection', (socket) => {
+    io.sockets.setMaxListeners(0);
+    socket.on('join', async function(room) {
+      // console.log('joined : ', room)
+      rooms[room] = socket;
+      let numClients = 0;
+      if (numClients < 100) {
+        (function asyncWhile() { 
+          if (pair_iterator <= pairs.length-1) {
+            socket.on('looking for remote user', function(data){
+              console.log("asyncWhile -> data", data)
+              currentPair.call_set.every(function(call) {
+                if(Object.values(call)[0].includes(room)){
+                  if(rooms[Object.values(call)[0].filter(cl => {return cl !== room})[0]]){
+                    io.compress(false).to(rooms[Object.values(call)[0].filter(cl => {return cl !== room})[0]].id).emit('ready', socket.id);
+                    return false;
+                  }
+                  return true;
+                } else {
+                  return true;
+                }
+              });
+            })
+            socket.on('ready', function(data) {
+              console.log("asyncWhile -> data", data)
+              currentPair.call_set.every(function(call) {
+                if(Object.values(call)[0].includes(room)){
+                  if(rooms[Object.values(call)[0].filter(cl => {return cl !== room})[0]]){
+                    io.compress(false).to(rooms[Object.values(call)[0].filter(cl => {return cl !== room})[0]].id).emit('ready', socket.id);
+                    return false;
+                  }
+                  return true;
+                } else {
+                  return true;
+                }
+              });
+            });
+            socket.on('switch call', function(id){
+              currentPair.call_set.every(function(call) {
+                if(Object.values(call)[0].includes(id)){
+                  if(rooms[Object.values(call)[0].filter(cl => {return cl !== room})[0]]){
+                    io.compress(false).to(rooms[Object.values(call)[0].filter(cl => {return cl !== room})[0]].id).emit('will change', socket.id);
+                    return false;
+                  }
+                  return true;
+                } else {
+                  return true;
+                }
+              });
+            })
+            socket.on('connect new', function(id){
+              asyncWhile(); 
+            })
+            socket.on('offer', function (id, message) {
+              socket.compress(false).to(id).emit('offer', socket.id, message);
+            });
+            socket.on('answer', function (id, message) {
+              socket.compress(false).to(id).emit('answer', socket.id, message);
+            });
+            socket.on('call established', function(room, message){
+              currentPair.call_set.filter(call => {
+                if(Object.values(call)[0].includes(room)){
+                  call.callTime = AddMinutesToDate(new Date(), 1);
+                  if(disconnectArr.length){
+                    for(let obj of disconnectArr){
+                      if(Object.keys(obj)[0] == Object.keys(call)[0]){
+                        obj.callTime = call.callTime;
+                      } else if(!conditionalArr.includes(Object.keys(call)[0])){
+                        conditionalArr.push(Object.keys(call)[0]);
+                        disconnectArr.push(call);
+                      }
+                    }
+                  } else {
+                    conditionalArr.push(Object.keys(call)[0]);
+                    disconnectArr.push(call);
+                  }
+                }
+              });
+              if(rooms['admin'] && rooms['admin'].id){
+                io.compress(false).to(rooms['admin'].id).emit('current pair to admin', currentPair);
+              }
+
+              setInterval(() => {
+                disconnectArr.filter(call => {
+                  if(Object.values(call)[0].includes(room)){
+                    if(call.callTime <= new Date()){
+                      let tempCall = call;
+                      let indx = disconnectArr.findIndex(obj => {
+                        return Object.keys(tempCall)[0] == Object.keys(obj)[0];
+                      })
+                      if(disconnectArr[indx] && conditionalArr[indx]){
+                        conditionalArr.splice(indx,1);
+                        disconnectArr.splice(indx,1);
+                        if(Object.values(tempCall)[0]){
+                          if(pair_iterator < pairs.length-1){
+                            pair_iterator++;
+                          } else {
+                            pair_iterator= 0;
+                          }
+                          currentPair = pairs[pair_iterator];
+                          if(rooms['admin'] && rooms['admin'].id){
+                            io.compress(false).to(rooms['admin'].id).emit('current pair to admin', currentPair);
+                          }
+                          if(Object.values(tempCall)[0][0] && Object.values(tempCall)[0][1] && rooms[Object.values(tempCall)[0][0]] && rooms[Object.values(tempCall)[0][1]]){
+                            io.compress(false).to(rooms[Object.values(tempCall)[0][0]].id).emit('will change', rooms[Object.values(tempCall)[0][1]].id);
+                            io.compress(false).to(rooms[Object.values(tempCall)[0][1]].id).emit('will change', rooms[Object.values(tempCall)[0][0]].id);
+                          }
+                          asyncWhile();
+                        }
+                      }
+                    }
+                  }
+                } )
+              }, global.duration * 1000);
+            })
+            socket.on('candidate', function (id, message) {
+              socket.compress(false).to(id).emit('candidate', socket.id, message);
+            });
+            socket.on('disconnect', function() {
+              currentPair.call_set.filter(function(call){
+                let callFound = Object.values(call)[0].includes(room) ? Object.values(call)[0] : [];
+                if(callFound.length){
+                  if(rooms[callFound.filter(cl => {return cl !== room})[0]]){
+                    io.compress(false).to(rooms[callFound.filter(cl => {return cl !== room})[0]].id).emit('bye', socket.id);
+                  }
+                }
+              })
+            });
+            socket.on('current pair', () => {
+              io.compress(false).to(rooms['admin'].id).emit('current pair to admin', currentPair);
+            });
+            socket.on('reset node call', () => {
+              currentPair.call_set.map(obj => {
+                if(rooms[obj.call_pair[0]] && rooms[obj.call_pair[1]]){
+                  io.compress(false).to(rooms[obj.call_pair[0]].id).emit('will change', rooms[obj.call_pair[1]].id);
+                  io.compress(false).to(rooms[obj.call_pair[1]].id).emit('will change', rooms[obj.call_pair[0]].id);
+                }
+              })
+              asyncWhile();
+            });
+            socket.on('disconnect call', (callNodes)=>{
+              if(rooms[callNodes.node_1.node_identity]){
+                io.compress(false).to(rooms[callNodes.node_1.node_identity].id).emit('bye', rooms[callNodes.node_2.node_identity].id);
+                io.compress(false).to(rooms[callNodes.node_2.node_identity].id).emit('bye', rooms[callNodes.node_1.node_identity].id);
+              }
+            })
+            socket.on('check node availiblity', (identity) =>{
+              if(rooms[identity] && rooms[identity].id){
+                socket.emit('update client status', { id : identity, status : 'available' })
+              } else {
+                socket.emit('update client status', { id : identity, status : 'not available' })
+              }
+            })
+          }
+          // else {
+          //   pair_iterator= 0;
+          //   asyncWhile(); 
+          // }
+        })(); //auto invoke
+        socket.join(room);
+      } else {
+        socket.emit('full', room);
+      }
+    });
+    socket.on('verify_update', async (system_details)=>{
+      console.log("await nodes_model.Node.findOne({nodeName: system_details.system_name, nodeDesc: system_details.system_ip}, {nodeDesc : 1, _id: 0})", await nodes_model.Node.findOne({nodeName: system_details.system_name, nodeDesc: system_details.system_ip}, {nodeDesc : 1, _id: 0}))
+      if(await nodes_model.Node.findOne({nodeName: system_details.system_name, nodeDesc: system_details.system_ip}, {nodeDesc : 1, _id: 0}) == null){
+        var node = new nodes_model.Node({ nodeName: system_details.system_name, nodeDesc: system_details.system_ip });
+        node.save();
+      }
+    })
+  });
+
+  /**
+   * Normalize a port into a number, string, or false.
+   */
+  function normalizePort(val) {
+    var port = parseInt(val, 10);
+
+    if (isNaN(port)) {
+      // named pipe
+      return val;
+    }
+
+    if (port >= 0) {
+      // port number
+      return port;
+    }
+
+    return false;
+  }
+
+  /**
+   * Event listener for HTTP server "error" event.
+   */
+  function onError(error) {
+    if (error.syscall !== 'listen') {
+      throw error;
+    }
+
+    var bind = typeof port === 'string'
+      ? 'Pipe ' + port
+      : 'Port ' + port;
+
+    // handle specific listen errors with friendly messages
+    switch (error.code) {
+      case 'EACCES':
+        console.error(bind + ' requires elevated privileges');
+        process.exit(1);
+        break;
+      case 'EADDRINUSE':
+        console.error(bind + ' is already in use');
+        changePort(port);
+        break;
+      default:
+        throw error;
+    }
+  }
+
+  /**
+   * Event listener for HTTP server "listening" event.
+   */
+  function onListening() {
+    var addr = server.address();
+    var bind = typeof addr === 'string'
+      ? 'pipe ' + addr
+      : 'port ' + addr.port;
+    debug('Listening on ' + bind);
+    console.log('Server listenning on port:', addr.port);
+  }
+}
+/**
+ * listening for the first time
+ */
+listen();
+
+function changePort(port) {
+  let input = process.stdin;
+  input.setEncoding('utf-8');
+  console.log("Do you want to change port?(yes/no)");
+  input.on('data', function (data) {
+    if (data === 'yes\n') {
+      listen(port + 1);
+    } else {
+      console.log("exiting...");
+      process.exit();
+    }
+  });
+}
