@@ -8,7 +8,7 @@
 Clone the repo.
 
 ```
-git clone https://github.com/cis-mohammadz/node-backend.git
+git clone https://github.com/pnpUniverse/meanCrud.git
 ```
 
 Install dependencies
