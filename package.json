@@ -2,7 +2,7 @@
   "name": "node-backend",
   "version": "0.0.0",
   "private": true,
-  "author": "Zeeshan A <mohammad.z@cisinlabs.com>",
+  "author": "Mohammad Zeeshan <mohammadzeeshan1210@gmail.com>",
   "scripts": {
     "start": "node ./bin/www",
     "dev": "nodemon --inspect ./bin/www"
